@@ -1,13 +1,17 @@
 (ns clj-fix.core
+  (:gen-class)
   (:use clj-fix.connection.protocol)
   (:use fix-translator.core)
-  (:require (clojure [string :as s])
-            (lamina [core :as l])
-            (aleph [tcp :as a])
-            (gloss [core :as g])
-            (cheshire [core :as c])
-            (clj-time [core :as t] [format :as f]))
-  (:import (java.util.concurrent Executors Future TimeUnit)))
+  (:require [clojure.string :as s]
+            [aleph.tcp :as a]
+            [gloss.core :as g]
+            [gloss.io :as io]
+            [manifold.deferred :as md]
+            [manifold.stream :as ms]
+            [cheshire.core :as c]
+            [clj-time.core :as t]
+            [clj-time.format :as f])
+  (:import (java.util.concurrent Executors TimeUnit)))
 
 ; FIX messages end with '10=xxx' where 'xxx' is a three-digit checksum
 ; left-padded with zeroes.
@@ -21,7 +25,23 @@
 (def sessions (atom {}))
 (def order-id-prefix (atom 0))
 
-(defrecord Conn [label venue host port sender target channel in-seq-num
+
+(def protocol
+  (g/string :ascii))  ;; alt is :utf-8
+
+
+(defn wrap-duplex-stream
+  [protocol s]
+  (let [out (ms/stream)]
+    (ms/connect
+      (ms/map #(io/encode protocol %) out)
+      s)
+    (ms/splice
+      out
+      (io/decode-stream s protocol))))
+
+
+(defrecord Conn [label venue host port sender target stream in-seq-num
                 out-seq-num next-msg msg-fragment translate?])
 
 (declare disconnect)
@@ -43,30 +63,36 @@
   [id]
   ((:id id) @sessions))
 
-(defn get-channel
-  "Returns the channel used by a session."
-  [session]
-  @@(:channel session))
+(defn print-sessions
+  []
+  (println @sessions))
 
-(defn open-channel?
-  "Returns whether a session's channel is open."
+(defn get-stream
+  "Returns the stream used by a session."
   [session]
-  (and (not= nil @(:channel session)) (not (l/closed? (get-channel session)))))
+    @(:stream session))
 
-(defn create-channel
-  "If a session doesn't already have an open channel, then create a new one and
+(defn open-stream?
+  "Returns whether a session's stream is open."
+  [session]
+    (and
+      (not= nil @(:stream session))
+      (not (ms/closed? (get-stream session)))))
+
+(defn create-stream
+  "If a session doesn't already have an open stream, then create a new one and
    assign it to the session."
   [session]
-  (if (not (open-channel? session))
+  (if (not (open-stream? session))
     (do
-      (reset! (:channel session) (a/tcp-client {:host (:host session),
-                                                :port (:port session),
-                                                :frame (g/string :ascii)}))
-      (try (get-channel session)
+      (reset!  (:stream session) @(md/chain (a/client { :host (:host session), 
+                                                      :port (:port session)})   
+                                    #(wrap-duplex-stream protocol %)))
+      (try (get-stream session)
         (catch java.net.ConnectException e
-          (reset! (:channel session) nil)
+          (reset! (:stream session) nil)
           (println (.getMessage e)))))
-    (error "Channel already open.")))
+    (error "Stream already open.")))
 
 (defn segment-msg
   "Takes a TCP segment and splits it into a collection of individual FIX
@@ -90,12 +116,15 @@
 
 (defn send-msg
   "Transforms a vector of spec-neutral tags and their values in the form [t0 v0
-   t1 v1 ...] into a FIX message, then sends it through the session's channel."
+   t1 v1 ...] into a FIX message, then sends it through the session's stream."
   [session msg-type msg-body]
+  (println "send-msg | msg-type " msg-type)
+  (println "send-msg | msg-body " msg-body)
   (let [msg (reduce #(apply conj % %2) [[:msg-type msg-type]
                                          (gen-msg-sig session) msg-body])
        encoded-msg (encode-msg (:venue session) msg)]
-     (l/enqueue (get-channel session) encoded-msg)))
+      (println "send-msg | encoded-msg " encoded-msg)
+      (ms/put! (get-stream session) encoded-msg)))
 
 (defn update-next-msg
   [old-msg new-msg] new-msg)
@@ -109,10 +138,10 @@
 
 (defn transmit-heartbeat
   ([session]
-    (if (open-channel? session)
+    (if (open-stream? session)
       (send-msg session :heartbeat [[]])))
   ([session test-request-id]
-    (if (open-channel? session)
+    (if (open-stream? session)
       (send-msg session :heartbeat [:test-request-id test-request-id]))))
 
 
@@ -127,23 +156,9 @@
     (.shutdown @heartbeat-transmitter)
     (reset! heartbeat-transmitter nil)))
 
-(defn logon-accepted [msg-type msg session]
-  (let [venue (:venue session)
-        decoded-msg (decode-msg venue msg-type msg)]
-    (update-user session {:msg-type msg-type
-                          :sender-comp-id (:sender-comp-id decoded-msg)})
-    (start-heartbeats (fn [] (transmit-heartbeat session))
-                      (:heartbeat-interval decoded-msg))))
 
-(defn heartbeat [])
+;; Define FIX Message Types
 
-(defn test-request [msg-type msg session]
-  (let [venue (:venue session)]
-    (transmit-heartbeat session (:test-request-id (decode-msg venue msg-type 
-                                                              msg)))))
-
-(defn session-reject []
-  (println "SESSION REJECT"))
 
 (defn execution-report [msg-type msg session]
   (let [venue (:venue session)]
@@ -151,9 +166,19 @@
       (update-user session (merge {:msg-type msg-type}
                                   (decode-msg venue msg-type msg)))
       (update-user session {:msg-type msg-type :report msg}))))
+ 
 
-(defn order-cancel-reject []
-  (println "ORDER CANCEL REJECT"))
+(defn heartbeat [])
+
+
+(defn logon-accepted [msg-type msg session]
+  (let [venue (:venue session)
+        decoded-msg (decode-msg venue msg-type msg)]
+    (update-user session {:msg-type msg-type
+                          :sender-comp-id (:sender-comp-id decoded-msg)})
+    (start-heartbeats (fn [] (transmit-heartbeat session))
+                      (:heartbeat-interval decoded-msg))))
+ 
 
 (defn logout-accepted [msg-type msg session]
   (let [venue (:venue session)]
@@ -162,8 +187,24 @@
                           :sender-comp-id (:sender-comp-id
                                             (decode-msg (:venue session)
                                                          msg-type msg))})))
+
+
+(defn new-order-single [msg-type msg session]
+  (println "new-order-single | msg-type " msg-type)
+  (println "new-order-single | msg " msg))
+ 
+ 
+(defn order-cancel-reject []
+  (println "ORDER CANCEL REJECT"))
+
+
 (defn resend-request []
   (println "RESEND REQUEST"))
+ 
+
+(defn session-reject []
+  (println "SESSION REJECT"))
+
 
 (defn sequence-reset [msg-type msg session]
   (let [venue (:venue session)
@@ -179,10 +220,21 @@
                     cur-in-seq-num ". No possible duplicate flag set.")))
         (reset! (:in-seq-num session) (- new-seq-num 1)))))
 
+
+(defn test-request [msg-type msg session]
+  (let [venue (:venue session)]
+    (transmit-heartbeat session (:test-request-id (decode-msg venue msg-type 
+                                                              msg)))))
+ 
+
+;; END Defining FIX message Types
+
+
 (defn msg-handler
   "Segments an inbound block of messages into individual messages, and processes
    them sequentially."
   [id msg]
+  (println "msg-handler | msg " msg)
   (let [session (get-session id)
         msg-fragment (:msg-fragment session)
         segments (segment-msg (str @msg-fragment msg))
@@ -199,23 +251,26 @@
             (let [msg-type (get-msg-type (:venue session) m)
                   _ (swap! (:in-seq-num session) inc)]
             (case msg-type
-              :logon (logon-accepted msg-type m session)
-
-              :heartbeat (heartbeat)
-
-              :test-request (test-request msg-type m session)
-
-              :reject (session-reject)
-
+              
               :execution-report (execution-report msg-type m session)
+              
+              :heartbeat (heartbeat)
+              
+              :logon (logon-accepted msg-type m session)
+              
+              :logout (logout-accepted msg-type m session)
+
+              :new-order-single (new-order-single msg-type m session)
 
               :order-cancel-reject (order-cancel-reject)
 
-              :logout (logout-accepted msg-type m session)
+              :reject (session-reject)
 
               :resend-request (resend-request)
 
               :seq-reset (sequence-reset msg-type m session)
+
+              :test-request (test-request msg-type m session)
               
               :unknown-msg-type (error "UNKNOWN MSG TYPE"))))
 
@@ -225,10 +280,10 @@
       (reset! msg-fragment (peek segments))))
 
 (defn gen-msg-handler
-  "Returns a message handler for the session's channel."
+  "Returns a message handler for the session's stream."
   [id]
-  (fn [msg]
-    (msg-handler id msg)))
+    (fn [msg]
+      (msg-handler id msg)))
 
 (defn replace-with-map-val
   "Takes a vector of tag-value pairs and a map of tag-value pairs. For each tag
@@ -254,27 +309,44 @@
           lst
           (conj lst tag value))) (vec ts) (vec additional-params))))
 
+
+(defn msg-consumer [stream f]
+  "Alt. expirement to handle deferreds from a stream"
+  (md/loop []
+    (md/chain (ms/take! stream ::drained)
+      ;; if we got a message, run it through `f`
+      (fn [msg]
+        (if (identical? ::drained msg)
+          ::drained
+          (f msg)))
+      ;; wait for the result from `f` to be realized, and
+      ;; recur, unless the stream is already drained
+      (fn [result]
+        (when-not (identical? ::drained result)
+          (md/recur))))))
+
+
 (defn connect
-  "Connect a session's channel." 
+  "Connect a session's stream." 
   ([id translate-returning-msgs]
   (if-let [session (get-session id)]
     (do
       (reset! (:translate? session) translate-returning-msgs)
-      (create-channel session)
-      (l/receive-all (get-channel session) #((gen-msg-handler id) %)))
+      (create-stream session)
+      (ms/consume #((gen-msg-handler id) %) (get-stream session)))
     (error (str "Session " (:id id) " not found. Please create it first.")))))
 
 (defrecord FixConn [id]
   Connection
   (logon
     [id msg-handler heartbeat-interval reset-seq-num translate-returning-msgs]
-    
+    (println "FixConn | Connection | msg-handler " msg-handler)
     (let [session (get-session id)]
-      (if (not (open-channel? session))
+      (if (not (open-stream? session))
         (connect id translate-returning-msgs))
       (if (= reset-seq-num :yes) 
-        (do (reset! (:out-seq-num session) 0)
-            (reset! (:in-seq-num session) 0)))
+        (do (reset! (:out-seq-num session) 1)
+            (reset! (:in-seq-num session) 1)))
       (add-watch (:next-msg session) :user-callback msg-handler)
       (send-msg session :logon [:heartbeat-interval heartbeat-interval
                                 :reset-seq-num reset-seq-num
@@ -347,8 +419,8 @@
   "Disconnect from a FIX session without logging out."
   [id]
   (if-let [session (get-session id)]
-    (if (open-channel? session)
-      (l/close (get-channel session)))
+    (if (open-stream? session)
+      (ms/close! (get-stream session)))
   (error (str "Session " id " not found."))))
 
 (defn write-session
@@ -357,6 +429,7 @@
   (let [config (c/parse-string (slurp "config/clients.cfg") true)
         session (get-session id)
         client-label (:label session)]
+    (println "session written to config/clients.cfg")
     (spit "config/clients.cfg" (c/generate-string
       (assoc-in
         (assoc-in

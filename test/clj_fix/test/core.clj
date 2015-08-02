@@ -2,45 +2,61 @@
   (:use [clj-fix.core])
   (:use [clojure.test])
   (:require (clojure [string :as s])
-            (lamina [core :as l])
             (aleph [tcp :as a])
-            (gloss [core :as g]))
+            (gloss [core :as g]) 
+            (manifold [deferred :as d])
+            (manifold [stream :as m]))
   (:import clj_fix.core.FixConn))
 
 (def msgs {
   :logon "8=FIX.4.2\u00019=76\u000135=A\u000134=702\u000149=ABC\u000152=20100130-10:52:40.663\u000156=XYZ\u000195=4\u000196=1234\u000198=0\u0001108=60\u000110=134\u0001"
   :heartbeat "8=FIX.4.2\u00019=51\u000135=0\u000134=703\u000149=ABC\u000152=20100130-10:53:40.830\u000156=XYZ\u000110=249\u0001"
   :test-request "8=FIX.4.2\u00019=076\u000135=1\u000152=20121024-06:25:58\u000149=ABC\u000156=XYZ\u000134=2\u0001112=BI_TEST\u000110=237\u0001"
-  :execution-report "8=FIX.4.2\u00019=266\u000135=8\u000149=ABC\u000156=XYZ\u000150=AZ12\u000157=NA\u000134=833\u000152=20100130-08:00:51.992\u000155=GLD\u000148=PL11YA\u0001167=FUT\u0001207=LIFFE\u00011=AA1\u000137=ABC1\u000117=INDNTHDOG\u000158=Fill\u0001200=201009\u0001205=13\u000132=25\u0001151=0\u000114=25\u000154=2\u000140=2\u000177=O\u000159=0\u0001150=2\u000120=0\u000139=2\u0001442=1\u000144=99.06\u000138=25\u000131=99.06\u00016=99.06\u000160=20100130-08:00:52\u000110=136\u0001"})
+  :execution-report "8=FIX.4.2\u00019=266\u000135=8\u000149=ABC\u000156=XYZ\u000150=AZ12\u000157=NA\u000134=833\u000152=20100130-08:00:51.992\u000155=GLD\u000148=PL11YA\u0001167=FUT\u0001207=LIFFE\u00011=AA1\u000137=ABC1\u000117=INDNTHDOG\u000158=Fill\u0001200=201009\u0001205=13\u000132=25\u0001151=0\u000114=25\u000154=2\u000140=2\u000177=O\u000159=0\u0001150=2\u000120=0\u000139=2\u0001442=1\u000144=99.06\u000138=25\u000131=99.06\u00016=99.06\u000160=20100130-08:00:52\u000110=136\u0001"
+  :new-order-single "8=FIX.4.2\u00019=129\u000135=D\u000149=sender-id\u000156=target-id\u000134=105\u000152=20150427-15:41:13\u000111=855925395\u000155=IBM\u000121=1\u000154=1\u000160=20150427-15:41:13\u000140=2\u000144=50\u000138=1000\u000110=176\u0001
+"})
 
-(defn echo-handler [channel client-info]
-  (l/siphon channel channel))
+
+
+
+
+(defn wrapped-echo-handler
+  [s info]
+    (m/connect
+      (m/map wrap-duplex-stream protocol s)
+      s))
+
+
 
 (defn create-test-server
   "Create a simple echo server to connect to."
-  [host port]
-  (a/start-tcp-server echo-handler {:port port}))
+  [port]
+  (a/start-server wrapped-echo-handler {:port port}))
 
-(deftest channel
+
+
+(deftest stream
   (let [conn-a (load-client :test-client-a)
-       {:keys [host port]} (get-session conn-a)
-        server-a (create-test-server host port)]
-  
-  (connect conn-a false)
-
-  ; Check if the channel is open.
-  (is (= true (open-channel? (get-session conn-a))))
-
-  ; Try to re-create the channel.
-  (is (thrown? Exception (create-channel (get-session conn-a))))
-
-  ; Close the channel.
-  (disconnect conn-a)
-  (is (= false (open-channel? (get-session conn-a))))
+       {:keys [port]} (get-session conn-a)
+        server-a (create-test-server port)]
  
-  ; Re-open the channel.
+  (println "conn-a -> " conn-a) 
   (connect conn-a false)
-  (is (= true (open-channel? (get-session conn-a))))
+  (println "conn-a -> " conn-a) 
+
+  ; Check if the stream is open.
+  (is (= true (open-stream? (get-session conn-a))))
+
+  ; Try to re-create the stream.
+  (is (thrown? Exception (create-stream (get-session conn-a))))
+
+  ; Close the stream.
+  (disconnect conn-a)
+  (is (= false (open-stream? (get-session conn-a))))
+ 
+  ; Re-open the stream.
+  (connect conn-a false)
+  (is (= true (open-stream? (get-session conn-a))))
 
   ; Connect with a garbage id.
   (is (thrown? Exception (connect "abc" false)))
@@ -58,13 +74,13 @@
           server-b (create-test-server host port)]
 
       (connect conn-b false)
-      (is (= true (open-channel? (get-session conn-b))))
+      (is (= true (open-stream? (get-session conn-b))))
       (server-b)))
 
   (server-a)
   (close-all)))
 
-(deftest segment-msg-t
+#_(deftest segment-msg-t
   (let [msg (:execution-report msgs)
         msg-fragment (apply str (take 100 msg))]
   
@@ -82,7 +98,7 @@
     ; Segment a block with one msg-fragment.
     (is (= [msg-fragment] (segment-msg msg-fragment)))))
 
-(deftest session-management
+#_(deftest session-management
   
   ; Create a new session.
   (let [nyse-session (load-client :test-client-a)]
@@ -114,7 +130,7 @@
 
   (close-all))
 
-(deftest replace-with-map-val-t
+#_(deftest replace-with-map-val-t
   (let [tag-value-coll [:this :a :that :b :other :c]]
 
   ; No matches against empty map.
@@ -143,7 +159,7 @@
   ; Empty tag-value collection and map.
   (is (= '() (replace-with-map-val [] {})))))
 
-(deftest merge-params-t
+#_(deftest merge-params-t
   (let [tag-value-coll [:this :a :that :b :other :c]]
 
     ; No additional params.

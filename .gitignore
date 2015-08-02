@@ -3,7 +3,9 @@
 /lib
 /classes
 /native
+/target
 /.lein-failures
 /checkouts
 /.lein-deps-sum
+npm-debug.log
 

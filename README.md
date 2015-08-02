@@ -28,11 +28,11 @@ clj-fix was written so that different trading scenarios could be generated to te
 ```Clojure
 
 ;Include this in your project.clj:
-[clj-fix "0.6.2"]
+[tuddman/clj-fix "0.6.4-SNAPSHOT"]
 
 ; Example:
 (defproject my-project "1.0"
-  :dependencies [[clj-fix "0.6.2"]])
+  :dependencies [[tuddman/clj-fix "0.6.4-SNAPSHOT"]])
 ```
 
 ## Usage
@@ -40,8 +40,8 @@ clj-fix was written so that different trading scenarios could be generated to te
 
 ; In your ns statement:
 (ns my-project.core
-  (:use clj-fix.core)
-  (:use clj-fix.connection.protocol))
+  (:require [tuddman/clj-fix.core :as fix]
+            [tuddman/clj-fix.connection.protocol :as conn]))
 ```
 
 ## Steps to create a FIX client using clj-fix
@@ -82,14 +82,14 @@ __4__.Write a callback function for clj-fix, which will use it to send you clien
 
 __5__.Load the client:
 ```clojure
-(def client (load-client :my-fix-client))
+(def client (fix/load-client :my-fix-client))
 ```
 
 __6__.Logon to your destination
 ```clojure
 ;; The logon params are [client-var, callback, heartbeat-interval, 
 ;; whether-to-reset-sequence-numbers, whether-to-translate-inbound-fix-messages]
-(logon client my-handler 60 :no true)
+(conn/logon client my-handler 60 :no true)
 ```
 Selecting _false_ for the last parameter will result in your client receiving FIX messages in their raw format (except for logon and logout acknowledgement messages which are always translated). Please see [fix-translator](https://github.com/nitinpunjabi/fix-translator) for more information.
 
@@ -98,26 +98,26 @@ __7__.Send an order:
 ; The new-order params are [the-client-var, side, quantity, symbol, price]
 ; This sends a buy order for 100 shares of NESNz at 10.0 of the
 ; symbol's currency
-(new-order client :buy 100 "NESNz" 10.0)
+(conn/new-order client :buy 100 "NESNz" 10.0)
 ```
 Supplying clj-fix's new-order command with minimal parameters results in a simple LIMIT DAY order being sent with the most common default values set. If you want to override a certain default (for example, supply your own client order id) or use a particular order type your destination supports, just include an additional map in the params:
 ```Clojure
 ; This sends a buy order for 100 shares of NESNz at 10.0 of the symbol's
 ; currency with a client specified id and an immediate-or-cancel time-in-force.
-(new-order client :buy 100 "NESNz" 10.0 {:client-order-id "my-own-id" :time-in-force :ioc})
+(conn/new-order client :buy 100 "NESNz" 10.0 {:client-order-id "my-own-id" :time-in-force :ioc})
 ```
 Canceling an order requires you to track and maintain orders as they change states. You can either write your own manager or use [clj-fix-oms](https://github.com/nitinpunjabi/clj-fix-oms) as a light-weight option.
 
 __8__.Logout of your destination:
 ```clojure
 ; The logout params are [client-var, reason] 
-(logout client "done")
+(conn/logout client "done")
 ```
 
 __9__.End your session properly so that clj-fix updates the config file.
 ```clojure
 ; The logout param is [client-var] 
-(end-session client)
+(fix/end-session client)
 ```
 
 
